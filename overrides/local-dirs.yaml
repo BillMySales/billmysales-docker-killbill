@@ -1,0 +1,36 @@
+# Keep the stack's data in local directories instead of named volumes, so it
+# is visible from the host (and easy to include in host-level backups).
+#
+# In .env:
+#   COMPOSE_FILE=compose.yaml:overrides/local-dirs.yaml
+#   DATA_DIR=./data        # optional, default ./data (relative to compose.yaml)
+#
+# Only the directories you keep here change; delete the lines you don't need
+# (e.g. keep just `backups`). Existing data in the named volumes is NOT moved:
+# switch before the first `up`, or restore a backup afterwards.
+# Kaui's key file is written by `setup` (as root) for Kaui's user (UID 1001).
+# Backup files are root-owned with mode 0600.
+
+services:
+  db:
+    volumes:
+      - ${DATA_DIR:-./data}/db:/var/lib/mysql
+  setup:
+    volumes:
+      - ${DATA_DIR:-./data}/kaui-config:/var/lib/kaui/stack
+      - ./scripts:/usr/local/share/stack/scripts:ro
+      - ./config/killbill:/usr/local/share/stack/config:ro
+  kaui:
+    volumes:
+      - ${DATA_DIR:-./data}/kaui-config:/var/lib/kaui/stack:ro
+      - ./config/tomcat/setenv2.sh:/var/lib/tomcat/bin/setenv2.sh:ro
+  caddy:
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${DATA_DIR:-./data}/caddy/data:/data
+      - ${DATA_DIR:-./data}/caddy/config:/config
+  backup:
+    volumes:
+      - ${DATA_DIR:-./data}/kaui-config:/kaui-config
+      - ${DATA_DIR:-./data}/backups:/backups
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro

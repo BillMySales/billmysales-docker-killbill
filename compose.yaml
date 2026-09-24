@@ -1,0 +1,280 @@
+# Kill Bill stack: Caddy (TLS) + Kill Bill (billing and payments API) + Kaui
+# (admin UI) + MariaDB, with schema and setup jobs and optional backups.
+#
+# Quick start (development):
+#   cp .env.dev.example .env
+#   docker compose up -d
+#   docker compose logs -f setup   # wait for "==> Done"
+#
+# Production: start from .env.prod.example instead. See README.md.
+#
+# Required variables have no default: compose refuses to start without them.
+
+name: ${COMPOSE_PROJECT_NAME:-killbill}
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-10m}
+    max-file: "${LOG_MAX_FILE:-3}"
+
+# Kill Bill with its plugins (image/Dockerfile), shared by migrate and killbill.
+x-killbill-image: &killbill-image
+  image: ${KILLBILL_IMAGE:-killbill-stack}:${KILLBILL_VERSION:-0.24.21}-email${EMAIL_NOTIFICATIONS_VERSION:-0.8.6}
+  build:
+    context: ./image
+    args:
+      KILLBILL_VERSION: ${KILLBILL_VERSION:-0.24.21}
+      EMAIL_NOTIFICATIONS_VERSION: ${EMAIL_NOTIFICATIONS_VERSION:-0.8.6}
+
+x-kaui-image: &kaui-image
+  image: killbill/kaui:${KAUI_VERSION:-4.0.26}
+
+x-db-env: &db-env
+  DB_HOST: db
+  DB_PORT: 3306
+  DB_USER: ${DB_USER:-killbill}
+  DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+
+services:
+  db:
+    image: mariadb:${MARIADB_VERSION:-11.8}
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env}
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: ${DB_MEMORY_LIMIT:-1g}
+
+  # One-shot job before Kill Bill starts: databases, user, schema and
+  # migrations, from the Kill Bill image itself. Runs on every `up`.
+  migrate:
+    <<: *killbill-image
+    logging: *logging
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *db-env
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env}
+    volumes:
+      - ./scripts:/usr/local/share/stack/scripts:ro
+    command: ["bash", "/usr/local/share/stack/scripts/migrate.sh"]
+    deploy:
+      resources:
+        limits:
+          memory: ${MIGRATE_MEMORY_LIMIT:-256m}
+
+  # Kill Bill (Tomcat): REST API on /1.0/kb, internal only (Caddy in front).
+  killbill:
+    <<: *killbill-image
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      KB_org_killbill_dao_url: jdbc:mysql://db:3306/killbill
+      KB_org_killbill_dao_user: ${DB_USER:-killbill}
+      KB_org_killbill_dao_password: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      KB_org_killbill_billing_osgi_dao_url: jdbc:mysql://db:3306/killbill
+      KB_org_killbill_billing_osgi_dao_user: ${DB_USER:-killbill}
+      KB_org_killbill_billing_osgi_dao_password: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      KB_org_killbill_server_baseUrl: ${KILLBILL_URL:?Set KILLBILL_URL in .env (e.g. https://billing.example.com)}
+      # Password of the `admin` user (API and Kaui login), written into shiro.ini.
+      KB_ADMIN_PASSWORD: ${KILLBILL_ADMIN_PASSWORD:?Set KILLBILL_ADMIN_PASSWORD in .env}
+      # Days before an invoice to send the "upcoming invoice" event (and email),
+      # e.g. 3d; 0s = off.
+      KB_org_killbill_invoice_dryRunNotificationSchedule: ${KILLBILL_UPCOMING_INVOICE_NOTICE:-0s}
+      TOMCAT_JAVA_XMS: ${KILLBILL_JAVA_XMX:-1g}
+      TOMCAT_JAVA_XMX: ${KILLBILL_JAVA_XMX:-1g}
+      TOMCAT_DISABLE_GC_LOGGING: "true"
+    # Lets Kill Bill reach services on the host (e.g. a notification callback
+    # running locally) at http://host.docker.internal:<port>, also on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config/tomcat/setenv2.sh:/var/lib/tomcat/bin/setenv2.sh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/1.0/healthcheck"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: ${KILLBILL_MEMORY_LIMIT:-1536m}
+
+  # One-shot job once Kill Bill runs: Kaui's database and encryption key, the
+  # tenant, its notification callback and its registration in Kaui.
+  setup:
+    <<: *kaui-image
+    logging: *logging
+    restart: "no"
+    # root only to write the key file for Kaui's user (tomcat).
+    user: root
+    depends_on:
+      killbill:
+        condition: service_healthy
+    environment:
+      <<: *db-env
+      KILLBILL_URL: ${KILLBILL_URL:?Set KILLBILL_URL in .env (e.g. https://billing.example.com)}
+      KILLBILL_INTERNAL_URL: http://killbill:8080
+      KILLBILL_ADMIN_USER: admin
+      KILLBILL_ADMIN_PASSWORD: ${KILLBILL_ADMIN_PASSWORD:?Set KILLBILL_ADMIN_PASSWORD in .env}
+      KILLBILL_TENANT_NAME: ${KILLBILL_TENANT_NAME:-default}
+      KILLBILL_API_KEY: ${KILLBILL_API_KEY:?Set KILLBILL_API_KEY in .env}
+      KILLBILL_API_SECRET: ${KILLBILL_API_SECRET:?Set KILLBILL_API_SECRET in .env}
+      KILLBILL_NOTIFICATION_URL: ${KILLBILL_NOTIFICATION_URL:-}
+      KILLBILL_INVOICE_LOCALE: ${KILLBILL_INVOICE_LOCALE:-es_CL}
+      KILLBILL_COMPANY_NAME: ${KILLBILL_COMPANY_NAME:-My Company}
+      KILLBILL_COMPANY_ADDRESS: ${KILLBILL_COMPANY_ADDRESS:-}
+      KILLBILL_COMPANY_CITY: ${KILLBILL_COMPANY_CITY:-}
+      KILLBILL_COMPANY_COUNTRY: ${KILLBILL_COMPANY_COUNTRY:-Chile}
+      KILLBILL_EMAIL_EVENTS: ${KILLBILL_EMAIL_EVENTS-INVOICE_CREATION,INVOICE_NOTIFICATION,INVOICE_PAYMENT_SUCCESS,INVOICE_PAYMENT_FAILED,SUBSCRIPTION_CANCEL}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_SECURE: ${SMTP_SECURE:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      KAUI_ENCRYPTION_FILENAME: /var/lib/kaui/stack/symmetric-encryption.yml
+    volumes:
+      - kaui_config:/var/lib/kaui/stack
+      - ./scripts:/usr/local/share/stack/scripts:ro
+      - ./config/killbill:/usr/local/share/stack/config:ro
+    command: ["bash", "/usr/local/share/stack/scripts/setup.sh"]
+    deploy:
+      resources:
+        limits:
+          memory: ${SETUP_MEMORY_LIMIT:-768m}
+
+  # Kaui (Rails on JRuby in Tomcat): the admin UI, internal only.
+  kaui:
+    <<: *kaui-image
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      KAUI_DB_URL: jdbc:mariadb://db:3306/kaui
+      KAUI_DB_USERNAME: ${DB_USER:-killbill}
+      KAUI_DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      KAUI_KILLBILL_URL: http://killbill:8080
+      KAUI_SECRET_KEY_BASE: ${KAUI_SECRET_KEY_BASE:?Set KAUI_SECRET_KEY_BASE in .env}
+      KAUI_ENCRYPTION_FILENAME: /var/lib/kaui/stack/symmetric-encryption.yml
+      KAUI_ROOT_USERNAME: admin
+      # jruby-rack's default response "dechunk" patch requires rack/chunked,
+      # which Rack 3.1+ (in this image) no longer has: Kaui fails to boot
+      # (500 on every page). "true" de-chunks without that patch.
+      STACK_JAVA_OPTS: -Djruby.rack.response.dechunk=true
+      TOMCAT_JAVA_XMS: ${KAUI_JAVA_XMX:-512m}
+      TOMCAT_JAVA_XMX: ${KAUI_JAVA_XMX:-512m}
+      TOMCAT_DISABLE_GC_LOGGING: "true"
+    volumes:
+      - kaui_config:/var/lib/kaui/stack:ro
+      - ./config/tomcat/setenv2.sh:/var/lib/tomcat/bin/setenv2.sh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/users/sign_in"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: ${KAUI_MEMORY_LIMIT:-1280m}
+
+  caddy:
+    image: caddy:${CADDY_VERSION:-2.11}-alpine
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      kaui:
+        condition: service_healthy
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    ports:
+      - "${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-80}:80"
+      - "${HTTP_BIND:-127.0.0.1}:${HTTPS_PORT:-443}:443"
+      - "${HTTP_BIND:-127.0.0.1}:${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # TLS certificates and keys (keep them: ACME rate limits).
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/1.0/healthcheck"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: ${CADDY_MEMORY_LIMIT:-256m}
+
+  # Optional (profile "mailpit", development): catches all outgoing mail.
+  # Set SMTP_HOST=mailpit and SMTP_PORT=1025; web UI on MAILPIT_PORT.
+  mailpit:
+    image: axllent/mailpit:${MAILPIT_VERSION:-v1.31}
+    profiles: ["mailpit"]
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "${HTTP_BIND:-127.0.0.1}:${MAILPIT_PORT:-8025}:8025"
+
+  # Optional (profile "backup"): dump of both databases plus Kaui's encryption
+  # key every BACKUP_INTERVAL_HOURS, kept BACKUP_KEEP_DAYS days in the
+  # `backups` volume (overrides/local-dirs.yaml puts them in a local directory).
+  backup:
+    image: mariadb:${MARIADB_VERSION:-11.8}
+    profiles: ["backup"]
+    restart: unless-stopped
+    logging: *logging
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      <<: *db-env
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-7}
+    volumes:
+      # Read-write so `backup.sh restore` can put the key back.
+      - kaui_config:/kaui-config
+      - backups:/backups
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+    entrypoint: ["bash", "/usr/local/bin/backup.sh"]
+    healthcheck:
+      test: ["CMD", "bash", "/usr/local/bin/backup.sh", "health"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKUP_MEMORY_LIMIT:-512m}
+
+volumes:
+  db_data:
+  kaui_config:
+  caddy_data:
+  caddy_config:
+  backups:

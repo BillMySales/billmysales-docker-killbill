@@ -1,0 +1,58 @@
+# Caddy in front of Kill Bill and Kaui: TLS, the public site address and
+# security headers. One address for both: the Kill Bill API (/1.0/..., its
+# plugins' endpoints and API docs) and Kaui (everything else).
+{
+	# No admin API: config is static, reloads happen by restarting the container.
+	admin off
+
+	servers {
+		# Behind a reverse proxy on a private network, log the real client IP
+		# and pass it on (X-Forwarded-For).
+		trusted_proxies static private_ranges
+		# Client IP = the right-most untrusted address (can't be spoofed).
+		trusted_proxies_strict
+	}
+}
+
+(killbill) {
+	encode zstd gzip
+
+	# One directive per header: in a single `header { }` block, Caddy applies
+	# the "?" (set if missing) fields together, only when all are missing.
+	header ?X-Content-Type-Options nosniff
+	header ?X-Frame-Options SAMEORIGIN
+	header ?Referrer-Policy strict-origin-when-cross-origin
+	header -Server
+
+	@api path /1.0/* /plugins/* /api.html /swagger*
+	handle @api {
+		# Tomcat builds absolute URLs (e.g. the Location of created objects)
+		# from X-Forwarded-Proto and -Port: without the port it assumes 80/443,
+		# wrong on other ports. Kept if a proxy in front (Traefik) sent it.
+		@no_forwarded_port not header X-Forwarded-Port *
+		request_header @no_forwarded_port X-Forwarded-Port {http.request.port}
+		reverse_proxy killbill:8080 {
+			header_up X-Forwarded-For {client_ip}
+		}
+	}
+	handle {
+		reverse_proxy kaui:8080 {
+			header_up X-Forwarded-For {client_ip}
+		}
+	}
+}
+
+# Public site. SITE_ADDRESS is ":80" for plain HTTP (local, or behind another
+# proxy) or a domain name, which makes Caddy obtain and renew a certificate
+# automatically ("localhost" uses Caddy's internal CA).
+{$SITE_ADDRESS} {
+	import killbill
+	log {
+		output stdout
+	}
+}
+
+# Internal-only site (port not published) for the container healthcheck.
+:8080 {
+	import killbill
+}
