@@ -206,12 +206,16 @@ then every `BACKUP_INTERVAL_HOURS`, and deletes files older than
 `BACKUP_KEEP_DAYS`. Files are readable by their owner only.
 
 ```shell
-docker compose run --rm backup now                  # back up now
-docker compose run --rm backup list                 # list timestamps
+docker compose run --rm --no-deps backup now                  # back up now
+docker compose run --rm --no-deps backup list                 # list timestamps
 docker compose stop killbill kaui                   # Kill Bill keeps caches: stop it first
-docker compose run --rm backup restore <timestamp>  # both databases and the key
+docker compose run --rm --no-deps backup restore <timestamp>  # both databases and the key
 docker compose up -d
 ```
+
+`--no-deps` keeps the command from starting `setup` first (with damaged
+data `setup` fails and the restore would never run); the database must
+be running (`docker compose up -d db` if the stack is down).
 
 A restore empties each database first, so nothing created after the backup
 remains.
