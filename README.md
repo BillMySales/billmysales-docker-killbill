@@ -17,6 +17,9 @@ server). Maintained by [BillMySales](https://www.billmysales.com).
 
 Kill Bill and Kaui are the vendor's images (Ubuntu, Java 11, Tomcat; amd64
 and arm64); MariaDB 11.8 is the version Kill Bill's own database image uses.
+The official `mariadb` image replaces that one (`killbill/mariadb`), whose
+initial schema is fixed when it's built, created as root only, and includes
+the Stripe and Analytics plugins' tables.
 The Kill Bill image is built locally from the vendor's (`image/Dockerfile`,
 a few seconds) to add the email notifications plugin (Apache-2.0), so the
 running image doesn't download anything.
@@ -151,6 +154,13 @@ curl "${KB[@]}" -X POST http://localhost:8110/1.0/kb/subscriptions -d '{"account
 Full catalogs (XML, several plans and phases) can be uploaded in Kaui's
 tenant configuration or with `POST /1.0/kb/catalog/xml`.
 
+API quirks to keep in mind in an integration:
+
+- An unknown API key answers `500`, not `404`.
+- Endpoints that return text (e.g. tenant configuration) answer `406` to
+  `Accept: application/json`.
+- A list endpoint called right after a write can miss the new items.
+
 Kill Bill POSTs every event of the tenant (`ACCOUNT_CREATION`,
 `SUBSCRIPTION_CREATION`, `INVOICE_CREATION`, `INVOICE_PAYMENT_SUCCESS`,
 `INVOICE_PAYMENT_FAILED`, ...) as JSON to `KILLBILL_NOTIFICATION_URL`: that's
@@ -177,9 +187,12 @@ account's `email`) on the events in `KILLBILL_EMAIL_EVENTS`:
 - Accounts with the locale `es_CL` get Spanish texts
   (`config/killbill/EmailTranslation.properties`, a translation of the
   plugin's English texts plus the `KILLBILL_COMPANY_*` values); the others
-  get the plugin's English. The HTML layout is the plugin's; custom
-  templates can be uploaded per tenant and locale (tenant key
-  `killbill-email-notifications:<TEMPLATE>_<locale>`, e.g.
+  get the plugin's English. The templates take every text from that
+  translation bundle (`{{text.*}}`), so another language only needs one
+  properties file (tenant key
+  `killbill-email-notifications:TEMPLATE_TRANSLATION_<locale>`). The HTML
+  layout is the plugin's; custom templates can be uploaded per tenant and
+  locale (tenant key `killbill-email-notifications:<TEMPLATE>_<locale>`, e.g.
   `INVOICE_CREATION_es_CL`, through `/1.0/kb/tenants/userKeyValue/<key>`).
 - Per account, the events can be changed through the plugin's API
   (`/plugins/killbill-email-notifications/v1/accounts/<id>`).
@@ -288,7 +301,9 @@ Notes:
 
 - More plugins (payment gateways such as Stripe or Adyen, analytics) go in
   `image/Dockerfile` (`kpm install_java_plugin ...`) and, if they have
-  tables, `migrate` creates them from their `ddl.sql`.
+  tables, `migrate` creates them from their `ddl.sql`. A plugin's name for
+  its configuration and servlet (`/plugins/<name>`) is e.g.
+  `killbill-email-notifications`, while kpm's directory adds `-plugin`.
 - Kaui 4.0.26 fails to boot with the default jruby-rack response "dechunk"
   patch (Rack 3.1+ has no `rack/chunked`): compose sets
   `-Djruby.rack.response.dechunk=true` for Kaui (`STACK_JAVA_OPTS`).
@@ -308,6 +323,8 @@ Security
 - Both vendor images enable a remote Java debugger (JDWP, port 12345) and
   unauthenticated JMX (port 8000) by default: `config/tomcat/setenv2.sh`
   removes them.
+- The vendor images run as `tomcat` (UID 1001), which has passwordless
+  `sudo` inside them.
 - Kaui stores tenant API secrets encrypted with a key generated per install
   (not the image's public one); keep it with the backups.
 - Only Caddy publishes ports; Kill Bill, Kaui and the database are internal
