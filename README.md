@@ -60,9 +60,9 @@ Production
 
 ```shell
 cp .env.prod.example .env
-# Fill in KILLBILL_URL, SITE_ADDRESS, DB_ROOT_PASSWORD, DB_PASSWORD,
+# Required: KILLBILL_URL, SITE_ADDRESS, DB_ROOT_PASSWORD, DB_PASSWORD,
 # KILLBILL_ADMIN_PASSWORD, KILLBILL_API_KEY, KILLBILL_API_SECRET,
-# KAUI_SECRET_KEY_BASE and the SMTP_* values.
+# KAUI_SECRET_KEY_BASE. Recommended: the SMTP_* values.
 docker compose up -d
 ```
 
@@ -70,6 +70,8 @@ docker compose up -d
   and renews it automatically (certificates live in the `caddy_data` volume).
 - Behind another TLS-terminating proxy, use `SITE_ADDRESS=:80`.
 - Compose refuses to start while a required value is missing.
+- Configure SMTP (recommended, not required): without `SMTP_HOST` Kill Bill
+  sends no emails (invoices, payments, cancellations; see [Emails](#emails)).
 - The `backup` profile is enabled by default in the production template.
 - Behind an existing Traefik (no host ports), use `overrides/traefik.yaml`
   (see [Overrides](#overrides)).
@@ -182,8 +184,8 @@ account's `email`) on the events in `KILLBILL_EMAIL_EVENTS`:
 
 - SMTP comes from `SMTP_*` (the plugin's tenant configuration, rewritten by
   `setup` when it changes); without `SMTP_HOST` no email is sent. The plugin
-  supports SMTPS (`SMTP_SECURE=ssl`, port 465) and plain SMTP, not STARTTLS
-  on port 587.
+  supports SMTPS (`SMTP_SECURE=ssl`, the default, port 465) and plain SMTP
+  (`SMTP_SECURE=none`), not STARTTLS on port 587.
 - Accounts with the locale `es_CL` get Spanish texts
   (`config/killbill/EmailTranslation.properties`, a translation of the
   plugin's English texts plus the `KILLBILL_COMPANY_*` values); the others
